@@ -71,6 +71,7 @@ export MISTRAL_API_KEY=...
 | `vibe -c` / `vibe --resume` | Continue / pick a previous session |
 | `vibe --setup` | Sign in (browser or API key) — full-screen wizard |
 | `vibe-signin` | **Headless browser sign-in** (this repo): prints the URL, writes the key |
+| `VIBE_CPUS=0,1 vibe …` | Pin the running agent to a core subset — no reinstall (default: all 4) |
 | `vibe --check-upgrade` | Check for a Vibe update and (optionally) install it |
 
 ⚠️ If `vibe` is **"command not found"** after reconnecting, open a new shell or
@@ -82,16 +83,26 @@ official installer doesn't).
 1. Vibe ships as a **Python package installed with uv** (`uv tool install
    mistral-vibe`). uv itself is a native armv7 binary — no bootstrap problem —
    and the whole app runs **natively**, no QEMU, no arch check to defeat.
-2. On armhf, four dependencies have **no prebuilt wheel** and compile from C
-   with the system gcc: `tree-sitter`, `tree-sitter-bash`, `zstandard`, `cffi`,
-   `pyyaml`. We bind that build to **2 cores** (`taskset`): a 4-core gcc build
-   once drove this H3 to 102 °C and froze the machine; 2 cores peaks ~87 °C.
-   `cryptography` and `pydantic-core` *do* ship armv7l wheels, so there is **no
-   Rust build** — the classic armhf pain point is avoided.
-3. The official installer drops `uv`/`vibe` in `~/.local/bin` but **never adds it
+2. On armhf, five dependencies have **no prebuilt wheel** and compile from C with
+   the system gcc: `tree-sitter`, `tree-sitter-bash`, `zstandard`, `cffi`,
+   `pyyaml`. `cryptography` and `pydantic-core` *do* ship armv7l wheels, so there
+   is **no Rust build** — the classic armhf pain point is avoided.
+3. Two `taskset`/`nice` core knobs (mirroring `KIMI_*` / `GROK_CPUS` on the sister
+   repos), both defaulting to **all 4 cores** (the Yumi build bench has a fan):
+   - **`VIBE_BUILD_CPUS`** — cores for the one-off wheel compile above.
+   - **`VIBE_CPUS`** — cores for the *running* agent (`~/.local/bin/vibe` is a
+     wrapper that `exec`s the real uv-tool binary under `taskset`).
+
+   On a **fanless** board, throttle to avoid the freeze — a 4-core gcc build once
+   drove this H3 to 102 °C (2 cores peaks ~87 °C):
+   ```bash
+   VIBE_BUILD_CPUS=0,1 curl -fsSL …/install.sh | bash   # install on 2 cores
+   VIBE_CPUS=0,1 vibe -p "…"                             # run the agent on 2 cores
+   ```
+4. The official installer drops `uv`/`vibe` in `~/.local/bin` but **never adds it
    to the login-shell `PATH`** — a real trap (`vibe: command not found` after a
    reconnect). The installer here appends it to `~/.bashrc` and `~/.profile`.
-4. Vibe is a **network client**: the model (`mistral-vibe-cli-latest`) runs on
+5. Vibe is a **network client**: the model (`mistral-vibe-cli-latest`) runs on
    Mistral's servers, so the H3 never carries the inference — it doesn't overheat
    the way the emulated grok CLI does (a one-shot stays ~85 °C). The catch is the
    **Python client cold start**: each `vibe -p` pays ~17 s of A7 CPU before the
@@ -107,8 +118,9 @@ Tested on a Yumi SmartPad (Allwinner H3, 4× Cortex-A7 @ 1.2 GHz, 1 GB RAM,
 Debian 13 trixie armhf, `vibe 2.21.0`, `uv 0.11.26`) on 2026-07-17. Any armv7l
 SBC with ≥ 1 GB RAM should work. Measured:
 
-- **First install**: ~14 min end-to-end (2-core compile; +2–3 min if the apt
-  build deps aren't already present).
+- **First install**: ~14 min end-to-end measured at **2 cores**
+  (`VIBE_BUILD_CPUS=0,1`, the fanless setting; +2–3 min if the apt build deps
+  aren't already present). The default is 4 cores (faster, fan bench).
 - **`vibe --version`**: 6.8 s (Python cold start).
 - **One-shot `vibe -p "short prompt"`**: **~20–21 s** end-to-end (measured twice,
   with a real key). Of that, **~17 s is board CPU** — the Python client cold-start

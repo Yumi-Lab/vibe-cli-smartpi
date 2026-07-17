@@ -5,7 +5,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/Yumi-Lab/vibe-cli-smartpi/main/install.sh | bash
 #
 # This script installs:
-#   ~/.local/bin/uv, ~/.local/bin/vibe   Mistral Vibe via uv (official installer)
+#   ~/.local/bin/uv                       Mistral Vibe via uv (official installer)
+#   ~/.local/bin/vibe                     runtime wrapper (cores via VIBE_CPUS)
+#   ~/.local/bin/vibe-signin              headless browser sign-in helper
 #   apt build deps                        so the native wheels compile on armhf
 #   ~/.local/bin on PATH                  (the official installer does NOT add it)
 #   earlyoom                              anti-freeze memory safety net (1 GB RAM)
@@ -13,16 +15,23 @@
 # Vibe is a Python application distributed through uv, not a prebuilt binary — so
 # unlike its 64-bit-only sister CLIs (grok, claude), the OFFICIAL installer runs
 # on armv7l as-is. The catch is that a few dependencies have no armv7l wheel and
-# are compiled from C source (tree-sitter, zstandard, cffi, pyyaml) — we bind that
-# gcc build to 2 cores so the H3 doesn't cook itself.
+# are compiled from C source (tree-sitter, zstandard, cffi, pyyaml).
+#
+# Two core-control knobs, matching kimi-cli-smartpi (KIMI_*) / grok-cli-smartpi:
+#   VIBE_BUILD_CPUS   cores for the one-off wheel COMPILE (this installer)
+#   VIBE_CPUS         cores for the RUNNING agent (the vibe wrapper, at any time)
 # See docs/METHODOLOGY.md for the reasoning behind every choice.
 set -euo pipefail
 
-# Bind the native-wheel compilation to 2 cores. A 4-core gcc build once drove
-# the H3 to 102 °C (machine freeze); 2 cores peaks around 87 °C. Override with
-# VIBE_BUILD_CPUS=0,1,2,3 on a cooled board.
-BUILD_CPUS="${VIBE_BUILD_CPUS:-0,1}"
+# Cores for the (hot) one-off wheel compilation. Default: all 4 — fast, and the
+# Yumi build bench adds a fan for these jobs. On a FANLESS H3 a 4-core gcc build
+# drives the SoC to ~102 °C and freezes it, so drop the count on a bare board:
+#   VIBE_BUILD_CPUS=0,1  curl -fsSL …/install.sh | bash   # 2 cores (~87 °C peak)
+#   VIBE_BUILD_CPUS=0    curl -fsSL …/install.sh | bash   # 1 core  (coolest, slowest)
+BUILD_CPUS="${VIBE_BUILD_CPUS:-0,1,2,3}"
 VIBE_INSTALLER="https://mistral.ai/vibe/install.sh"
+# Real uv-tool binary behind ~/.local/bin/vibe (which we turn into a wrapper).
+VIBE_TOOL_BIN="$HOME/.local/share/uv/tools/mistral-vibe/bin/vibe"
 RAW="https://raw.githubusercontent.com/Yumi-Lab/vibe-cli-smartpi/main"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || true)"
 
@@ -62,21 +71,44 @@ else
 fi
 
 # 2. Mistral Vibe via its official installer (which also brings uv into
-#    ~/.local/bin). Idempotent: if vibe is already installed we skip the ~15 min
-#    compile — pass VIBE_FORCE=1 to reinstall/upgrade.
-if command -v vibe >/dev/null 2>&1 || [ -x "$HOME/.local/bin/vibe" ]; then
-  CUR="$("$HOME/.local/bin/vibe" --version 2>/dev/null || vibe --version 2>/dev/null || echo '?')"
-  if [ -n "${VIBE_FORCE:-}" ]; then
-    log "Vibe already present ($CUR) — VIBE_FORCE set, reinstalling/upgrading…"
-    curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash
-  else
-    log "Vibe already installed ($CUR) — skipping reinstall (set VIBE_FORCE=1 to upgrade)."
-  fi
+#    ~/.local/bin). Idempotent: keyed on the uv-tool venv binary, NOT on
+#    ~/.local/bin/vibe (step 2b turns that into a wrapper). Skips the ~15 min
+#    compile when already present — pass VIBE_FORCE=1 to reinstall/upgrade.
+if [ -x "$VIBE_TOOL_BIN" ] && [ -z "${VIBE_FORCE:-}" ]; then
+  log "Vibe already installed ($("$VIBE_TOOL_BIN" --version 2>/dev/null)) — skipping reinstall (VIBE_FORCE=1 to upgrade)."
+elif [ -x "$VIBE_TOOL_BIN" ]; then
+  log "Vibe present — VIBE_FORCE set, reinstalling/upgrading on cores ${BUILD_CPUS}…"
+  curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash
 else
-  log "Installing Mistral Vibe via uv — compiles native wheels, ~15 min on the H3 (2 cores)…"
+  log "Installing Mistral Vibe via uv — compiles native wheels on cores ${BUILD_CPUS}, ~15 min on the H3…"
   curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash \
     || fail "Vibe installer failed (see the output above)."
+  [ -x "$VIBE_TOOL_BIN" ] || fail "Vibe venv not found at $VIBE_TOOL_BIN after install."
 fi
+
+# 2b. Runtime core control (VIBE_CPUS). Replace uv's ~/.local/bin/vibe symlink
+#     with a wrapper that pins the RUNNING agent to a configurable set of cores —
+#     the runtime counterpart of GROK_CPUS / KIMI_CPUS. Default: all 4. On a
+#     fanless board running a heavy agentic loop, throttle without reinstalling:
+#         VIBE_CPUS=0,1 vibe …
+#     The wrapper always calls the real venv binary (never itself → no recursion).
+#     NB: `uv tool upgrade mistral-vibe` (or --check-upgrade) rewrites this symlink,
+#     so re-run install.sh after an upgrade to restore the wrapper.
+mkdir -p "$HOME/.local/bin"
+WRAP="$HOME/.local/bin/vibe"
+[ -x "$VIBE_TOOL_BIN" ] || fail "real vibe binary missing at $VIBE_TOOL_BIN — cannot build wrapper."
+# CRITICAL: ~/.local/bin/vibe is a SYMLINK to $VIBE_TOOL_BIN. `cat > "$WRAP"`
+# would FOLLOW it and overwrite the real venv binary with a wrapper that points
+# to itself → infinite taskset/nice recursion. `rm -f` removes the link itself
+# (never the target), so we then create a fresh regular file at the link's place.
+rm -f "$WRAP"
+cat > "$WRAP" <<EOF
+#!/bin/sh
+# vibe-cli-smartpi runtime wrapper — cores set by VIBE_CPUS (default: all 4).
+exec taskset -c "\${VIBE_CPUS:-0,1,2,3}" nice -n 5 "$VIBE_TOOL_BIN" "\$@"
+EOF
+chmod +x "$WRAP"
+log "vibe runtime wrapper installed (VIBE_CPUS default 0,1,2,3)."
 
 # 3. PATH fix. The official installer drops uv/vibe into ~/.local/bin but does
 #    NOT add it to the PATH of login shells → `vibe: command not found` after a
@@ -111,7 +143,8 @@ fi
 
 export PATH="$HOME/.local/bin:$PATH"
 hash -r 2>/dev/null || true
-log "Check: $(vibe --version 2>/dev/null || echo 'vibe not on PATH — open a new shell')"
+# Runs through the wrapper (taskset/nice) — proves it's wired.
+log "Check: $(timeout 25 vibe --version 2>/dev/null || echo 'vibe --version did not answer — open a new shell')"
 
 cat <<'MSG'
 
@@ -132,9 +165,12 @@ Usage:
     vibe -p "task" --yolo     one-shot, auto-approving every tool call
     vibe --version            sanity check (~7 s cold start on the H3)
 
+    VIBE_CPUS=0,1 vibe …      limit the running agent to 2 cores (default: all 4)
+
 Notes:
     * If `vibe` is "not found" after reconnecting: open a new shell, or run
       `. ~/.profile` — the installer just added ~/.local/bin to your PATH.
     * To upgrade later: re-run this script with VIBE_FORCE=1 (or `vibe --check-upgrade`).
+      An upgrade rewrites ~/.local/bin/vibe — re-run install.sh to restore the wrapper.
     * Keep one heavy CLI at a time on a 1 GB board; earlyoom is the safety net.
 MSG

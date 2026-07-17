@@ -68,27 +68,48 @@ python3-dev  gcc  libffi-dev  pkg-config  libjpeg-dev  zlib1g-dev
 The build uses Debian trixie's own `arm-linux-gnueabihf-gcc 14` — no third-party
 repo, no cross-compilation.
 
-## 4. Thermals: bind the compile to 2 cores
+## 4. Thermals: two core knobs (build + runtime)
 
-The single real hazard is heat. A `uv` build parallelises across all cores, and a
-sustained 4-core gcc load on the passively-cooled H3 is exactly the workload that
-**drove this same pad to 102 °C and froze it** (measured incident, documented in
-the grok methodology). So the installer wraps the whole thing:
+The single real hazard is heat. Both the wheel compile *and* a heavy agent loop
+can pin all four cores, and a sustained 4-core load on the passively-cooled H3 is
+exactly the workload that **drove this same pad to 102 °C and froze it** (measured
+incident, documented in the grok methodology). So — matching `KIMI_BUILD_CPUS` /
+`KIMI_CPUS` on kimi-cli-smartpi and `GROK_CPUS` on grok-cli-smartpi — this repo
+exposes two `taskset -c … nice -n 5` knobs, **both defaulting to all 4 cores**
+(fast; the Yumi build bench adds a fan). On a **fanless** board, drop them.
+
+**`VIBE_BUILD_CPUS`** — the one-off wheel compile. The installer wraps the whole
+official installer, and `taskset` affinity is inherited by every child (uv, gcc,
+cc1), so the compile stays on the chosen cores:
 
 ```
-curl -LsSf https://mistral.ai/vibe/install.sh | taskset -c 0,1 nice -n 5 bash
+curl -LsSf https://mistral.ai/vibe/install.sh | taskset -c "$VIBE_BUILD_CPUS" nice -n 5 bash
 ```
 
-`taskset` CPU affinity is inherited by every child (uv, gcc, cc1), so the entire
-compile stays on 2 cores. Measured with that throttle:
+Measured at **2 cores** (`VIBE_BUILD_CPUS=0,1`, the safe fanless setting):
 
 - Peak **~87 °C** during the C builds (kernel passive throttling holds it there;
   chassis throttles from 75 °C, trip points at 75/80/85/90 °C).
 - Back to **70 °C** within a minute of finishing.
 - Total wall time **14 min 01 s** (user 16 min 14 s — i.e. ~1.15× parallelism on
-  the 2 permitted cores).
+  the 2 permitted cores). Four cores (with a fan) roughly halves that.
 
-Override on a cooled board with `VIBE_BUILD_CPUS=0,1,2,3`.
+**`VIBE_CPUS`** — the *running* agent. uv exposes `~/.local/bin/vibe` as a symlink
+to the tool venv; the installer **replaces it with a wrapper** that pins every run:
+
+```sh
+#!/bin/sh
+exec taskset -c "${VIBE_CPUS:-0,1,2,3}" nice -n 5 \
+  "$HOME/.local/share/uv/tools/mistral-vibe/bin/vibe" "$@"
+```
+
+So `VIBE_CPUS=0,1 vibe …` throttles a live agent with no reinstall (the affinity
+is inherited by vibe's tool subprocesses too). The wrapper always calls the real
+venv binary — never itself, so no recursion. **Caveat:** `uv tool upgrade
+mistral-vibe` (and `vibe --check-upgrade`) rewrites that symlink back, dropping the
+wrapper — re-run `install.sh` afterwards to restore it. Idempotence is therefore
+keyed on the venv binary (`…/uv/tools/mistral-vibe/bin/vibe`), **not** on
+`~/.local/bin/vibe`.
 
 ## 5. The PATH trap
 
@@ -172,8 +193,9 @@ board carries none of the inference). Get a key at
 
 ```
 ~/.local/bin/uv, ~/.local/bin/uvx                  native armv7 uv (installer)
-~/.local/bin/vibe        → ~/.local/share/uv/tools/mistral-vibe/bin/vibe
+~/.local/bin/vibe                                   VIBE_CPUS wrapper → tool venv binary (this repo)
 ~/.local/bin/vibe-signin                            headless browser sign-in helper (this repo)
+~/.local/share/uv/tools/mistral-vibe/bin/vibe      the REAL Vibe binary (uv tool venv)
 ~/.local/share/uv/tools/mistral-vibe/              isolated tool environment
 ~/.vibe/config.toml                                created on first run
 ~/.vibe/.env                                        MISTRAL_API_KEY (recommended)
