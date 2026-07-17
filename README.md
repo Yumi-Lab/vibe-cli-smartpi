@@ -14,14 +14,16 @@ required — the LLM runs on Mistral's servers).
 
 ```
 ██████████████████░░
-██████████████████░░     Mistral Vibe  2.21.0
-████  ██████  ████░░     armv7l · Python via uv
+██████████████████░░
+████  ██████  ████░░
 ████    ██    ████░░
-████          ████░░     vibe            interactive TUI
-████  ██  ██  ████░░     vibe -p "…"     one-shot
+████          ████░░
+████  ██  ██  ████░░
 ██      ██      ██░░
 ██████████████████░░
 ██████████████████░░
+
+Mistral Vibe 2.21.0 · armv7l · Python via uv
 ```
 
 ## Install
