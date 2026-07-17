@@ -230,7 +230,30 @@ the OOM killer reacts — the installer enables **earlyoom**. Operating rules:
 one heavy CLI at a time, and bound batch workloads
 (`systemd-run --scope -p MemoryMax=600M`, `timeout`).
 
-## 9. Maintenance
+## 9. Dead ends (tested)
+
+Vibe is the smoothest of the four (native, no emulation, no version pin), so the
+list is short — but these were tried on the H3 and rejected:
+
+- **The native browser sign-in on a headless pad** — `vibe --setup` → *Sign in with
+  browser* calls `webbrowser.open()` on the **local** machine and raises when there
+  is no browser / `$DISPLAY`. Dead end on a headless H3; replaced by the
+  `vibe-signin` helper that prints the URL to approve on another machine (§6a).
+- **Assuming Vibe is a thin client** — the ~20 s one-shot is **board-bound, not
+  API-bound**: ~17 s is the Cortex-A7 running the Python client (cold start +
+  agent-loop init), not the Mistral round-trip (§8). Batch scripts that budget for
+  "just network latency" are wrong by ~17 s per call — keep an interactive session
+  open instead.
+- **Bracing for the armhf Rust build** — the usual killer (compiling
+  `cryptography`'s Rust backend on 1 GB of RAM) **never happens**: `cryptography`
+  and `pydantic-core` ship armv7l wheels, so only small C extensions compile (§3).
+  Don't waste time provisioning a Rust toolchain.
+- **Blind reinstalls** — re-running the official `uv tool install` / installer over
+  an existing setup rebuilds wheels and rewrites `~/.local/bin/vibe` back to the
+  bare symlink, dropping the `VIBE_CPUS` wrapper. Use `install.sh` instead
+  (idempotent; `VIBE_FORCE=1` to actually upgrade) — see Maintenance below.
+
+## 10. Maintenance
 
 - **Upgrading**: re-run `install.sh` with `VIBE_FORCE=1` (re-runs the official
   installer through the 2-core throttle), or `vibe --check-upgrade`. uv caches
