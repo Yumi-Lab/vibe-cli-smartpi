@@ -36,15 +36,28 @@ Run it as your **normal user** (not root) — Vibe installs into `~/.local`; `su
 is used only for the apt build dependencies. First install compiles native
 wheels and takes **~15 min** on the H3 (bound to 2 cores; see below).
 
-Then give it a **Mistral API key** (create one at
+Then authenticate — Vibe supports **two methods**, both verified on the pad:
+
+**a) Browser sign-in (no API key to copy).** `vibe --setup` → *Sign in with
+browser* runs a PKCE flow against `console.mistral.ai`: it mints a one-time
+`console.mistral.ai/codestral/cli/authenticate?...` URL, you approve it in any
+browser logged into your Mistral account, and Vibe fetches + stores the key
+itself. On a **headless pad** the local browser can't open, so this repo ships a
+helper that prints the URL for you to open on another machine:
+
+```bash
+vibe-signin        # prints the sign-in URL, waits, writes MISTRAL_API_KEY to ~/.vibe/.env
+```
+
+**b) API key directly** (create one at
 [console.mistral.ai](https://console.mistral.ai/) → API keys):
 
 ```bash
-vibe --setup                              # full-screen wizard, stores the key
+vibe --setup                              # full-screen wizard → "Enter API key"
 # — or, fully headless:
-mkdir -p ~/.vibe && echo 'MISTRAL_API_KEY=sk-...' >> ~/.vibe/.env
+mkdir -p ~/.vibe && echo 'MISTRAL_API_KEY=...' >> ~/.vibe/.env
 # — or per-shell:
-export MISTRAL_API_KEY=sk-...
+export MISTRAL_API_KEY=...
 ```
 
 ## Usage
@@ -56,7 +69,8 @@ export MISTRAL_API_KEY=sk-...
 | `vibe -p "task" --yolo` | One-shot, auto-approving every tool call (`--auto-approve` alias) |
 | `vibe --output streaming -p "…"` | One-shot with newline-delimited JSON events |
 | `vibe -c` / `vibe --resume` | Continue / pick a previous session |
-| `vibe --setup` | Set the Mistral API key (full-screen wizard) |
+| `vibe --setup` | Sign in (browser or API key) — full-screen wizard |
+| `vibe-signin` | **Headless browser sign-in** (this repo): prints the URL, writes the key |
 | `vibe --check-upgrade` | Check for a Vibe update and (optionally) install it |
 
 ⚠️ If `vibe` is **"command not found"** after reconnecting, open a new shell or
@@ -77,11 +91,12 @@ official installer doesn't).
 3. The official installer drops `uv`/`vibe` in `~/.local/bin` but **never adds it
    to the login-shell `PATH`** — a real trap (`vibe: command not found` after a
    reconnect). The installer here appends it to `~/.bashrc` and `~/.profile`.
-4. Vibe is a **thin client**: the model (`mistral-vibe-cli-latest`) runs on
-   Mistral's servers, so the H3 only orchestrates the agent loop (tool calls,
-   file I/O, parsing). This makes it comfortable for long multi-turn agentic work
-   on the pad — the board never carries the inference, so it doesn't overheat the
-   way the emulated grok CLI does. `earlyoom` is installed as a memory safety net.
+4. Vibe is a **network client**: the model (`mistral-vibe-cli-latest`) runs on
+   Mistral's servers, so the H3 never carries the inference — it doesn't overheat
+   the way the emulated grok CLI does (a one-shot stays ~85 °C). The catch is the
+   **Python client cold start**: each `vibe -p` pays ~17 s of A7 CPU before the
+   answer (see measurements below), so an already-open interactive session is the
+   better fit for multi-turn work. `earlyoom` is installed as a memory safety net.
 
 Full details (dependency-by-dependency wheel table, thermal measurements, auth
 pitfalls, dead ends): [docs/METHODOLOGY.md](docs/METHODOLOGY.md)
@@ -95,12 +110,16 @@ SBC with ≥ 1 GB RAM should work. Measured:
 - **First install**: ~14 min end-to-end (2-core compile; +2–3 min if the apt
   build deps aren't already present).
 - **`vibe --version`**: 6.8 s (Python cold start).
-- **Startup temperature**: 68 °C idle, ~87 °C peak during the wheel compile
-  (2 cores, kernel thermal throttling holds it there), back to 70 °C at rest.
-- **One-shot / interactive latency** is dominated by the **Mistral API** (network
-  round-trip + server-side generation), *not* the board — the H3 runs only the
-  thin Python client. The auth path was verified end-to-end against
-  `api.mistral.ai` (model `mistral-vibe-cli-latest`).
+- **One-shot `vibe -p "short prompt"`**: **~20–21 s** end-to-end (measured twice,
+  with a real key). Of that, **~17 s is board CPU** — the Python client cold-start
+  and agent-loop orchestration on the Cortex-A7 — and only a few seconds is the
+  Mistral API round-trip. The board never runs the inference (model
+  `mistral-vibe-cli-latest` is server-side), but the client itself is the cost on
+  a 32-bit A7. An already-running interactive `vibe` session avoids paying that
+  cold start on every turn.
+- **Temperature**: 68 °C idle, ~87 °C peak during the wheel compile (2 cores,
+  kernel thermal throttling holds it there), back to ~70 °C at rest; a one-shot
+  stays around 85 °C (no inference on-board).
 
 On 1 GB of RAM with SD-card swap, memory exhaustion freezes the machine before
 the kernel OOM killer reacts — the installer enables **earlyoom**. Rule on the

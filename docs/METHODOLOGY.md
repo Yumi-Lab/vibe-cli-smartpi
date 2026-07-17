@@ -109,18 +109,45 @@ export PATH="$HOME/.local/bin:$PATH"
 to `~/.bashrc` and `~/.profile` (idempotently — it checks for `.local/bin`
 first). A running session still needs `. ~/.profile` or a new shell.
 
-## 6. Authentication (Mistral API key)
+## 6. Authentication — two methods, both verified
 
-Vibe authenticates with a **Mistral API key** — there is **no OAuth / device-code
-flow** (unlike grok's `login --device-auth` or claude's `setup-token`). The model
-runs server-side, so the key is all that's needed. Verified on the pad, three
-equivalent ways:
+Vibe ends up needing a **Mistral API key**, but there are **two ways** to get one
+onto the board (both tested on the pad on 2026-07-17). The `vibe --setup` wizard
+(`vibe/setup/onboarding/…`) has an `auth_method` screen that offers exactly these.
 
-1. **`vibe --setup`** — a full-screen TUI wizard (alternate-screen, mouse
-   tracking) that stores the key and exits. Needs a real terminal.
-2. **`~/.vibe/.env`** — `MISTRAL_API_KEY=sk-...` on its own line. Best for
-   headless boards.
-3. **Shell env** — `export MISTRAL_API_KEY=sk-...`.
+### 6a. Browser sign-in (PKCE) — the "give me a link" flow
+
+Yes, Vibe **does** have a browser sign-in flow (contrary to a first read of the
+error message). Reconstructed from `vibe/setup/auth/http_browser_sign_in_gateway.py`
+and reproduced end-to-end on the pad:
+
+1. Generate a PKCE pair: `verifier = secrets.token_urlsafe(64)`,
+   `challenge = base64url(sha256(verifier))` (no padding).
+2. `POST https://console.mistral.ai/api/vibe/sign-in`
+   `{"code_challenge": <challenge>, "code_challenge_method": "S256"}` →
+   `{process_id, sign_in_url, poll_url, expires_at}` (no auth header needed —
+   it's the browser session that authorises).
+3. The `sign_in_url` is
+   `https://console.mistral.ai/codestral/cli/authenticate?process_id=…&complete_token=…`
+   — open it in any browser logged into a Mistral account, approve (~15 min TTL).
+4. Poll `GET {poll_url}` every 3 s until `status == "completed"` (→ `exchange_token`);
+   `410 Gone` = expired.
+5. `POST https://console.mistral.ai/api/vibe/sign-in/{process_id}/exchange`
+   `{"exchange_token", "code_verifier"}` → `{"api_key": "…"}` (a 32-char key).
+6. Persist it: keyring first, else `~/.vibe/.env` (`vibe/setup/auth/api_key_persistence.py`).
+
+The native `vibe --setup` browser option calls `webbrowser.open()` **locally** —
+useless on a headless pad (no browser, no `$DISPLAY`), and it raises if it can't
+open. So this repo ships **`vibe-signin`**, a stdlib-only helper that runs the
+exact flow above but *prints* the URL (to open on another machine) and writes the
+key to `~/.vibe/.env`. Base URLs live in `vibe/core/config/_defaults.py`
+(`console.mistral.ai`, overridable via `VIBE_*`).
+
+### 6b. API key directly
+
+1. **`vibe --setup`** → *Enter API key* (full-screen TUI, needs a real terminal).
+2. **`~/.vibe/.env`** — `MISTRAL_API_KEY=...` on its own line. Best headless.
+3. **Shell env** — `export MISTRAL_API_KEY=...`.
 
 The exact, verified error when no key is set:
 
@@ -146,6 +173,7 @@ board carries none of the inference). Get a key at
 ```
 ~/.local/bin/uv, ~/.local/bin/uvx                  native armv7 uv (installer)
 ~/.local/bin/vibe        → ~/.local/share/uv/tools/mistral-vibe/bin/vibe
+~/.local/bin/vibe-signin                            headless browser sign-in helper (this repo)
 ~/.local/share/uv/tools/mistral-vibe/              isolated tool environment
 ~/.vibe/config.toml                                created on first run
 ~/.vibe/.env                                        MISTRAL_API_KEY (recommended)
@@ -163,13 +191,17 @@ Useful environment variables (from `vibe --help`): `VIBE_HOME` (override
 Measured on the SmartPad:
 
 - `vibe --version`: **6.8 s** (Python cold start of the client).
-- **One-shot / interactive latency is API-bound, not board-bound.** Vibe is a
-  thin client: `mistral-vibe-cli-latest` runs on Mistral's servers, so wall time
-  is network round-trip + server generation + local tool execution — largely
-  independent of the H3. This is why, unlike the grok/claude pages, no
-  board-specific "one-shot ~Xs" figure is quoted: it would measure Mistral's
-  infrastructure, not the pad. (The corollary is a genuine advantage — the board
-  never carries the inference, so long agentic sessions don't overheat it.)
+- **One-shot `vibe -p "short prompt"`: ~20–21 s** (measured twice with a real key:
+  21.0 s and 20.3 s wall). The revealing part is the split: **user CPU ≈ 17 s**,
+  i.e. most of the wall time is the **board** running the Python client (cold
+  start + agent-loop init + request/response handling on a Cortex-A7), *not* the
+  Mistral API. The model runs server-side, so the board never carries the
+  inference (temp stays ~85 °C, no runaway) — but the client itself is the tax,
+  and it is paid on **every** `vibe -p`. Keep an interactive `vibe` session open
+  for multi-turn work to amortise the cold start.
+- Correcting an earlier assumption: this latency is **board-bound, not
+  API-bound** — the naive "it's just a thin client, the pad does nothing" is wrong
+  by ~17 s.
 
 On 1 GB of RAM with SD-card swap, memory exhaustion freezes the machine before
 the OOM killer reacts — the installer enables **earlyoom**. Operating rules:

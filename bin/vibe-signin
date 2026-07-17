@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+# vibe-signin — headless browser sign-in for Mistral Vibe on a pad with no browser.
+#
+# The native `vibe --setup` "Sign in with browser" option calls webbrowser.open()
+# on the LOCAL machine — useless on a Smart Pi One (no browser, no $DISPLAY). This
+# helper runs the exact same PKCE flow (vibe/setup/auth/http_browser_sign_in_gateway.py)
+# but PRINTS the sign-in URL so you can approve it on any other machine, then writes
+# MISTRAL_API_KEY to ~/.vibe/.env. Standard library only — no dependencies.
+#
+# Usage:  vibe-signin
+# Override the console host if needed:  VIBE_CONSOLE_BASE_URL=https://console.mistral.ai vibe-signin
+import base64, hashlib, json, os, secrets, sys, time, urllib.error, urllib.request
+
+BASE = os.environ.get("VIBE_CONSOLE_BASE_URL", "https://console.mistral.ai").rstrip("/")
+API = BASE + "/api"
+ENV_PATH = os.path.join(os.environ.get("VIBE_HOME", os.path.expanduser("~/.vibe")), ".env")
+UA = "mistral-vibe-smartpi/1.0 (+https://github.com/Yumi-Lab/vibe-cli-smartpi)"
+POLL_INTERVAL = 3.0
+TIMEOUT_S = 15 * 60
+
+
+def _req(url, payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Accept": "application/json", "User-Agent": UA}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers,
+                                 method="POST" if data is not None else "GET")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.status, json.load(r)
+
+
+def _persist(api_key):
+    os.makedirs(os.path.dirname(ENV_PATH), exist_ok=True)
+    lines = []
+    if os.path.exists(ENV_PATH):
+        lines = [l for l in open(ENV_PATH).read().splitlines()
+                 if not l.startswith("MISTRAL_API_KEY=")]
+    lines.append("MISTRAL_API_KEY=" + api_key)
+    with open(ENV_PATH, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(ENV_PATH, 0o600)
+
+
+def main():
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+
+    try:
+        _, proc = _req(f"{API}/vibe/sign-in",
+                       {"code_challenge": challenge, "code_challenge_method": "S256"})
+    except urllib.error.URLError as e:
+        print(f"error: could not start sign-in against {API}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    pid, poll_url = proc["process_id"], proc["poll_url"]
+    print("\n  Open this URL in a browser signed in to your Mistral account and approve:\n")
+    print("    " + proc["sign_in_url"] + "\n")
+    print(f"  (expires {proc.get('expires_at', 'soon')}; waiting for approval…)\n")
+
+    # Best-effort: open locally too, in case a browser IS available.
+    try:
+        import webbrowser
+        webbrowser.open(proc["sign_in_url"])
+    except Exception:
+        pass
+
+    deadline = time.time() + TIMEOUT_S
+    token, last = None, None
+    while time.time() < deadline:
+        try:
+            _, payload = _req(poll_url)
+        except urllib.error.HTTPError as e:
+            if e.code == 410:
+                print("error: sign-in expired.", file=sys.stderr); sys.exit(2)
+            time.sleep(POLL_INTERVAL); continue
+        except urllib.error.URLError:
+            time.sleep(POLL_INTERVAL); continue
+        st = payload.get("status")
+        if st != last:
+            print(f"  status: {st}"); last = st
+        if st == "completed":
+            token = payload.get("exchange_token"); break
+        if st in ("expired", "denied", "error"):
+            print(f"error: sign-in {st}. {payload.get('message', '')}", file=sys.stderr)
+            sys.exit(2)
+        time.sleep(POLL_INTERVAL)
+
+    if not token:
+        print("error: timed out waiting for approval.", file=sys.stderr); sys.exit(3)
+
+    _, ex = _req(f"{API}/vibe/sign-in/{pid}/exchange",
+                 {"exchange_token": token, "code_verifier": verifier})
+    api_key = ex.get("api_key")
+    if not api_key:
+        print("error: exchange returned no api_key.", file=sys.stderr); sys.exit(4)
+
+    _persist(api_key)
+    print(f"\n  Signed in. MISTRAL_API_KEY written to {ENV_PATH} (mode 600).")
+    print("  Try it:  vibe -p \"hello from the pad\"\n")
+
+
+if __name__ == "__main__":
+    main()

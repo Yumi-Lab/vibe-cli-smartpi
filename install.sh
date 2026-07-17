@@ -23,6 +23,8 @@ set -euo pipefail
 # VIBE_BUILD_CPUS=0,1,2,3 on a cooled board.
 BUILD_CPUS="${VIBE_BUILD_CPUS:-0,1}"
 VIBE_INSTALLER="https://mistral.ai/vibe/install.sh"
+RAW="https://raw.githubusercontent.com/Yumi-Lab/vibe-cli-smartpi/main"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || true)"
 
 log()  { printf '\033[1;36m[vibe-smartpi]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[vibe-smartpi]\033[0m %s\n' "$*" >&2; }
@@ -33,6 +35,16 @@ fail() { printf '\033[1;31m[vibe-smartpi]\033[0m %s\n' "$*" >&2; exit 1; }
 command -v curl >/dev/null || fail "curl is required"
 
 THROTTLE="taskset -c $BUILD_CPUS nice -n 5"
+
+# Fetch a repo file: local copy if run from a clone, otherwise raw GitHub.
+# Target lives under $HOME (user-owned) — no sudo.
+fetch_user() { # $1 repo-relative path, $2 destination
+  if [ -n "$HERE" ] && [ -f "$HERE/$1" ]; then
+    install -m755 "$HERE/$1" "$2"
+  else
+    tmpf=$(mktemp); curl -fsSL "$RAW/$1" -o "$tmpf" && install -m755 "$tmpf" "$2"; rm -f "$tmpf"
+  fi
+}
 
 # 1. Build dependencies. Vibe compiles native wheels on armhf (no prebuilt
 #    armv7l wheels for tree-sitter, zstandard, cffi, pyyaml): python3-dev + gcc
@@ -79,7 +91,17 @@ add_path_line() {
 add_path_line "$HOME/.bashrc"
 add_path_line "$HOME/.profile"
 
-# 4. Anti-freeze safety net: kills the largest process before memory exhaustion
+# 4. Headless browser sign-in helper. `vibe --setup`'s browser option calls
+#    webbrowser.open() locally — useless on a pad with no browser. vibe-signin
+#    runs the same PKCE flow but prints the URL to approve on another machine.
+mkdir -p "$HOME/.local/bin"
+if fetch_user bin/vibe-signin "$HOME/.local/bin/vibe-signin"; then
+  log "installed vibe-signin (headless browser sign-in helper)"
+else
+  warn "vibe-signin helper not installed (non-fatal) — use 'vibe --setup' or ~/.vibe/.env."
+fi
+
+# 5. Anti-freeze safety net: kills the largest process before memory exhaustion
 #    (1 GB of RAM + SD-card swap = full machine freeze otherwise).
 if command -v apt-get >/dev/null; then
   sudo apt-get install -y -qq earlyoom >/dev/null 2>&1 \
@@ -95,12 +117,14 @@ cat <<'MSG'
 
 Install complete.
 
-Sign in with a Mistral API key (get one at https://console.mistral.ai/ → API keys):
-    vibe --setup                          full-screen wizard, stores the key, then exits
-  or, fully headless / non-interactive, write it once to ~/.vibe/.env:
-    mkdir -p ~/.vibe && echo 'MISTRAL_API_KEY=sk-...' >> ~/.vibe/.env
-  or export it in your shell:
-    export MISTRAL_API_KEY=sk-...
+Sign in — two ways (both work headless):
+  a) Browser sign-in (no key to copy), best on a pad with no browser:
+    vibe-signin                           prints a console.mistral.ai URL to approve
+                                          on any machine, then writes ~/.vibe/.env
+  b) API key directly (get one at https://console.mistral.ai/ → API keys):
+    vibe --setup                          full-screen wizard → "Enter API key"
+    mkdir -p ~/.vibe && echo 'MISTRAL_API_KEY=...' >> ~/.vibe/.env    # or headless
+    export MISTRAL_API_KEY=...                                        # or per-shell
 
 Usage:
     vibe                      full interactive TUI (type a prompt to start)
