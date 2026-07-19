@@ -1,0 +1,32 @@
+#!/bin/sh
+# vibe-check-update — one JSON line: installed vs newest Mistral Vibe version.
+#   {"cli":"vibe","installed":"1.4.2","latest":"1.5.0","update_available":true}
+#
+# Contract shared by every Yumi-Lab/*-smartpi repo (<cli>-check-update): no sudo,
+# no side effects, fast; "latest"/"installed" are null when unknown (offline,
+# not installed). The Yumi AI Gateway polls this to light its update badge, then
+# re-runs install.sh to actually update (which restores the VIBE_CPUS wrapper
+# that a bare `uv tool upgrade` would clobber).
+#
+# Installed source of truth: the uv tool venv dist-info (instant). Fallback:
+# `vibe --version` (~7 s cold Python start on the H3, hence the timeout).
+
+installed=""
+for d in "$HOME"/.local/share/uv/tools/mistral-vibe/lib/python*/site-packages/mistral_vibe-*.dist-info; do
+  [ -d "$d" ] || continue
+  installed="$(basename "$d" | sed -E 's/^mistral_vibe-([0-9][0-9a-zA-Z.]*)\.dist-info$/\1/')"
+done
+if [ -z "$installed" ] && command -v vibe >/dev/null 2>&1; then
+  installed="$(timeout 30 vibe --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+fi
+
+latest="$(curl -fsSL --max-time 10 https://pypi.org/pypi/mistral-vibe/json 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])' 2>/dev/null)"
+case "$latest" in *[!0-9a-zA-Z.]*|"") latest="" ;; esac
+
+up=false
+[ -n "$installed" ] && [ -n "$latest" ] && [ "$installed" != "$latest" ] && up=true
+
+j() { if [ -n "$1" ]; then printf '"%s"' "$1"; else printf 'null'; fi; }
+printf '{"cli":"vibe","installed":%s,"latest":%s,"update_available":%s}\n' \
+  "$(j "$installed")" "$(j "$latest")" "$up"

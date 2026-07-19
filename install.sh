@@ -8,9 +8,20 @@
 #   ~/.local/bin/uv                       Mistral Vibe via uv (official installer)
 #   ~/.local/bin/vibe                     runtime wrapper (cores via VIBE_CPUS)
 #   ~/.local/bin/vibe-signin              headless browser sign-in helper
+#   ~/.local/bin/vibe-check-update        update probe (JSON one-liner, OTA contract)
 #   apt build deps                        so the native wheels compile on armhf
 #   ~/.local/bin on PATH                  (the official installer does NOT add it)
 #   earlyoom                              anti-freeze memory safety net (1 GB RAM)
+#
+# OTA contract (shared by every Yumi-Lab/*-smartpi repo):
+#   * re-running this script IS the update: already installed → `uv tool upgrade
+#     mistral-vibe` (fast no-op when current), then the VIBE_CPUS wrapper is
+#     restored (an upgrade rewrites ~/.local/bin/vibe). VIBE_FORCE=1 re-runs the
+#     full official installer instead;
+#   * `vibe-check-update` prints one JSON line {installed, latest,
+#     update_available} — what the Yumi AI Gateway polls for its update badge;
+#   * everything lives under $HOME → no sudo needed after the first install
+#     (apt build deps): the gateway service user updates unprivileged.
 #
 # Vibe is a Python application distributed through uv, not a prebuilt binary — so
 # unlike its 64-bit-only sister CLIs (grok, claude), the OFFICIAL installer runs
@@ -43,7 +54,18 @@ fail() { printf '\033[1;31m[vibe-smartpi]\033[0m %s\n' "$*" >&2; exit 1; }
 [ "$(uname -m)" = "armv7l" ] || fail "This script targets armv7l (detected: $(uname -m)). On 64-bit just use the official installer: curl -LsSf $VIBE_INSTALLER | bash"
 command -v curl >/dev/null || fail "curl is required"
 
+export PATH="$HOME/.local/bin:$PATH"   # uv and vibe live here; make them visible now
+
 THROTTLE="taskset -c $BUILD_CPUS nice -n 5"
+
+# apt is possible when: root (n/a here), passwordless sudo, or an interactive
+# run where sudo can prompt on the tty. The gateway service user (no sudo, no
+# tty) skips apt cleanly — the gateway installer set the build deps up as root.
+can_apt() {
+  command -v apt-get >/dev/null || return 1
+  sudo -n true 2>/dev/null && return 0
+  [ -t 1 ] && command -v sudo >/dev/null
+}
 
 # Fetch a repo file: local copy if run from a clone, otherwise raw GitHub.
 # Target lives under $HOME (user-owned) — no sudo.
@@ -59,26 +81,30 @@ fetch_user() { # $1 repo-relative path, $2 destination
 #    armv7l wheels for tree-sitter, zstandard, cffi, pyyaml): python3-dev + gcc
 #    + libffi-dev + pkg-config are needed, libjpeg/zlib for the imaging deps.
 #    cryptography and pydantic-core DO ship armv7l wheels — no Rust build here.
-log "Installing build dependencies (apt)…"
-if command -v apt-get >/dev/null; then
+if can_apt; then
+  log "Installing build dependencies (apt)…"
   sudo apt-get update -qq
   sudo apt-get install -y -qq \
     python3 python3-dev python3-venv \
     gcc libffi-dev pkg-config libjpeg-dev zlib1g-dev \
     curl ca-certificates >/dev/null
 else
-  warn "apt-get not found — make sure python3-dev, gcc, libffi-dev, pkg-config, libjpeg and zlib headers are installed."
+  warn "apt unavailable (no sudo/tty) — assuming python3-dev, gcc, libffi-dev, pkg-config, libjpeg and zlib headers are already installed."
 fi
 
 # 2. Mistral Vibe via its official installer (which also brings uv into
 #    ~/.local/bin). Idempotent: keyed on the uv-tool venv binary, NOT on
-#    ~/.local/bin/vibe (step 2b turns that into a wrapper). Skips the ~15 min
-#    compile when already present — pass VIBE_FORCE=1 to reinstall/upgrade.
-if [ -x "$VIBE_TOOL_BIN" ] && [ -z "${VIBE_FORCE:-}" ]; then
-  log "Vibe already installed ($("$VIBE_TOOL_BIN" --version 2>/dev/null)) — skipping reinstall (VIBE_FORCE=1 to upgrade)."
-elif [ -x "$VIBE_TOOL_BIN" ]; then
-  log "Vibe present — VIBE_FORCE set, reinstalling/upgrading on cores ${BUILD_CPUS}…"
+#    ~/.local/bin/vibe (step 2b turns that into a wrapper).
+#    Already installed → re-run = UPDATE: `uv tool upgrade` (fast no-op when
+#    current; only a real upgrade recompiles wheels, throttled like the install).
+#    VIBE_FORCE=1 re-runs the full official installer instead.
+if [ -x "$VIBE_TOOL_BIN" ] && [ -n "${VIBE_FORCE:-}" ]; then
+  log "Vibe present — VIBE_FORCE set, reinstalling via the official installer on cores ${BUILD_CPUS}…"
   curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash
+elif [ -x "$VIBE_TOOL_BIN" ]; then
+  log "Vibe already installed ($("$VIBE_TOOL_BIN" --version 2>/dev/null | head -1)) — checking for an upgrade…"
+  command -v uv >/dev/null || fail "uv not found on PATH — re-run with VIBE_FORCE=1 to repair."
+  $THROTTLE uv tool upgrade mistral-vibe || warn "uv tool upgrade failed — keeping the installed version."
 else
   log "Installing Mistral Vibe via uv — compiles native wheels on cores ${BUILD_CPUS}, ~15 min on the H3…"
   curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash \
@@ -133,9 +159,18 @@ else
   warn "vibe-signin helper not installed (non-fatal) — use 'vibe --setup' or ~/.vibe/.env."
 fi
 
+# 4b. Update probe (OTA contract shared by every *-smartpi repo): one JSON line
+#     {installed, latest, update_available} — polled by the Yumi AI Gateway.
+if fetch_user bin/vibe-check-update "$HOME/.local/bin/vibe-check-update"; then
+  log "installed vibe-check-update (update probe)"
+else
+  warn "vibe-check-update not installed (non-fatal)."
+fi
+
 # 5. Anti-freeze safety net: kills the largest process before memory exhaustion
-#    (1 GB of RAM + SD-card swap = full machine freeze otherwise).
-if command -v apt-get >/dev/null; then
+#    (1 GB of RAM + SD-card swap = full machine freeze otherwise). Optional —
+#    skipped cleanly when apt/sudo is unavailable (unprivileged OTA update).
+if can_apt; then
   sudo apt-get install -y -qq earlyoom >/dev/null 2>&1 \
     && sudo systemctl enable --now earlyoom >/dev/null 2>&1 \
     && log "earlyoom active" || true
@@ -170,7 +205,10 @@ Usage:
 Notes:
     * If `vibe` is "not found" after reconnecting: open a new shell, or run
       `. ~/.profile` — the installer just added ~/.local/bin to your PATH.
-    * To upgrade later: re-run this script with VIBE_FORCE=1 (or `vibe --check-upgrade`).
-      An upgrade rewrites ~/.local/bin/vibe — re-run install.sh to restore the wrapper.
+    * To upgrade later: just re-run install.sh (already installed → uv tool
+      upgrade + wrapper restored). Check first with vibe-check-update.
+      VIBE_FORCE=1 re-runs the full official installer (repair).
+    * NEVER a bare `uv tool upgrade mistral-vibe`: it rewrites ~/.local/bin/vibe
+      and drops the VIBE_CPUS wrapper — install.sh restores it.
     * Keep one heavy CLI at a time on a 1 GB board; earlyoom is the safety net.
 MSG

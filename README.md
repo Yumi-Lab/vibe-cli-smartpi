@@ -72,11 +72,27 @@ export MISTRAL_API_KEY=...
 | `vibe --setup` | Sign in (browser or API key) — full-screen wizard |
 | `vibe-signin` | **Headless browser sign-in** (this repo): prints the URL, writes the key |
 | `VIBE_CPUS=0,1 vibe …` | Pin the running agent to a core subset — no reinstall (default: all 4) |
-| `vibe --check-upgrade` | Check for a Vibe update and (optionally) install it |
+| `vibe-check-update` | Update probe (this repo): one JSON line `{installed, latest, update_available}` |
 
 ⚠️ If `vibe` is **"command not found"** after reconnecting, open a new shell or
 run `. ~/.profile` — the installer adds `~/.local/bin` to your `PATH` (the
 official installer doesn't).
+
+## Updating (OTA)
+
+- **Check:** `vibe-check-update` prints one JSON line —
+  `{"cli":"vibe","installed":"2.20.0","latest":"2.21.0","update_available":true}`.
+  This is the probe the [Yumi AI Gateway](https://github.com/Yumi-Lab/yumi-ai-gateway)
+  console polls for its update badge.
+- **Update:** re-run `install.sh` — that IS the updater: already installed →
+  `uv tool upgrade mistral-vibe` (fast no-op when current), then the `VIBE_CPUS`
+  wrapper is restored. `VIBE_FORCE=1` re-runs the full official installer
+  (repair).
+- ⚠️ **Never run a bare `uv tool upgrade mistral-vibe`** (or `vibe
+  --check-upgrade`'s install path): an upgrade rewrites `~/.local/bin/vibe` and
+  drops the wrapper — `install.sh` restores it.
+- **Privileges:** everything lives under `$HOME` — no sudo needed after the
+  first install (apt build deps): the gateway service user updates unprivileged.
 
 ## How it works
 
