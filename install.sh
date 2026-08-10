@@ -56,6 +56,11 @@ command -v curl >/dev/null || fail "curl is required"
 
 export PATH="$HOME/.local/bin:$PATH"   # uv and vibe live here; make them visible now
 
+# Pull Yumi's pre-built armv7l wheels (tree-sitter, zstandard, cffi, pyyaml, Pillow)
+# instead of compiling them on the board — turns a ~80 min build into a download.
+# uv honours UV_FIND_LINKS for both the official installer and `uv tool upgrade`.
+export UV_FIND_LINKS="${VIBE_WHEELS:-https://raw.githubusercontent.com/Yumi-Lab/smartpi-wheels/main/index.html}"
+
 THROTTLE="taskset -c $BUILD_CPUS nice -n 5"
 
 # apt is possible when: root (n/a here), passwordless sudo, or an interactive
