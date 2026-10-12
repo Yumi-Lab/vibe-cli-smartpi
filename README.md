@@ -186,18 +186,30 @@ On 1 GB of RAM with SD-card swap, memory exhaustion freezes the machine before
 the kernel OOM killer reacts — the installer enables **earlyoom**. Rule on the
 pad: one heavy CLI at a time.
 
+## Mainland China
+
+Measured 2026-10-12 from a Smart Pi on a direct Hangzhou fibre line: GitHub raw
+files and PyPI are fine, but **`mistral.ai` refuses the connection, and
+`api.mistral.ai` / `console.mistral.ai` are DNS-poisoned and unreachable** —
+neither the install nor any prompt can work. GitHub release downloads (uv,
+smartpi-wheels) crawl at ~5 KB/s. Through a VPN exit outside China **with DNS
+resolved through it** (routing alone is not enough: the poisoned answer comes
+from the local resolver), everything works — verified from the same office.
+
 ## Sister projects (same board, other CLIs)
 
 - [grok-cli-smartpi](https://github.com/Yumi-Lab/grok-cli-smartpi) — official xAI
   Grok CLI, via QEMU 64-on-32 emulation of the static Rust binary.
 - [claude-code-smartpi](https://github.com/Yumi-Lab/claude-code-smartpi) —
-  official Anthropic Claude Code, native (pinned to the last pure-JS npm release).
+  official Anthropic Claude Code, JS extracted from the Bun binary, native.
+- [codex-cli-smartpi](https://github.com/Yumi-Lab/codex-cli-smartpi) — official
+  OpenAI Codex CLI, same 64-on-32 emulation path as grok.
 - [kimi-cli-smartpi](https://github.com/Yumi-Lab/kimi-cli-smartpi) — Moonshot Kimi
   CLI, native Python via uv.
 - [kimi-code-smartpi](https://github.com/Yumi-Lab/kimi-code-smartpi) — Moonshot Kimi
   Code CLI (the TypeScript successor to kimi-cli), native via npm + Node 22.
 
-All five are driven together by the [Yumi AI
+All are driven together by the [Yumi AI
 Gateway](https://github.com/Yumi-Lab/yumi-ai-gateway).
 
 ## Licensing

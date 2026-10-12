@@ -329,3 +329,23 @@ list is short — but these were tried on the H3 and rejected:
   defaults already use all 4 cores (fan bench).
 - Check thermal health after heavy use:
   `cat /sys/class/thermal/thermal_zone0/temp`.
+
+## 11. Network: mainland China
+
+Measured 2026-10-12 from a Smart Pi One on a direct Hangzhou fibre line (no VPN):
+
+| Endpoint | Used for | Result |
+|---|---|---|
+| `raw.githubusercontent.com` | this installer, wheel index | ✔ 0.5–1.2 s |
+| `astral.sh` | uv installer script | ✔ 5 s |
+| `github.com/…/releases/download` | uv binary, smartpi-wheels assets | ✖ ~5 KB/s, times out |
+| `pypi.org` / `files.pythonhosted.org` | Vibe and its dependencies | ✔ |
+| `mistral.ai` | official Vibe installer | ✖ connection refused |
+| `api.mistral.ai`, `console.mistral.ai` | every prompt, sign-in | ✖ DNS-poisoned, unreachable |
+
+The local resolver answers `*.mistral.ai` with unrelated addresses, so sending the
+traffic through a tunnel is not enough on its own — DNS has to be resolved through
+it too. From the same office on a VPN exit outside China with its resolver,
+`api.mistral.ai` answers normally. A pad in China therefore needs that kind of
+network for both the install and every prompt.
+
