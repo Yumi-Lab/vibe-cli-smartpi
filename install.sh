@@ -9,7 +9,8 @@
 #   ~/.local/bin/vibe                     runtime wrapper (cores via VIBE_CPUS)
 #   ~/.local/bin/vibe-signin              headless browser sign-in helper
 #   ~/.local/bin/vibe-check-update        update probe (JSON one-liner, OTA contract)
-#   apt build deps                        so the native wheels compile on armhf
+#   ~/.local/share/vibe-cli-smartpi/vibe-release.sh   release rule shared with the probe
+#   apt build deps                        fallback compile of a wheel nobody pre-built
 #   ~/.local/bin on PATH                  (the official installer does NOT add it)
 #   earlyoom                              anti-freeze memory safety net (1 GB RAM)
 #
@@ -25,8 +26,11 @@
 #
 # Vibe is a Python application distributed through uv, not a prebuilt binary — so
 # unlike its 64-bit-only sister CLIs (grok, claude), the OFFICIAL installer runs
-# on armv7l as-is. The catch is that a few dependencies have no armv7l wheel and
-# are compiled from C source (tree-sitter, zstandard, cffi, pyyaml).
+# on armv7l as-is. Two catches: a few C-extension dependencies have no armv7l
+# wheel (Yumi pre-builds them), and since 2.25.1 Vibe itself needs a native Rust
+# harness Mistral doesn't build for armv7l — so uv is told never to build
+# mistral-vibe, and installs the newest release that ships a usable wheel.
+# Both rules live in lib/vibe-release.sh.
 #
 # Two core-control knobs, matching kimi-cli-smartpi (KIMI_*) / grok-cli-smartpi:
 #   VIBE_BUILD_CPUS   cores for the one-off wheel COMPILE (this installer)
@@ -56,11 +60,6 @@ command -v curl >/dev/null || fail "curl is required"
 
 export PATH="$HOME/.local/bin:$PATH"   # uv and vibe live here; make them visible now
 
-# Pull Yumi's pre-built armv7l wheels (tree-sitter, zstandard, cffi, pyyaml, Pillow)
-# instead of compiling them on the board — turns a ~80 min build into a download.
-# uv honours UV_FIND_LINKS for both the official installer and `uv tool upgrade`.
-export UV_FIND_LINKS="${VIBE_WHEELS:-https://raw.githubusercontent.com/Yumi-Lab/smartpi-wheels/main/index.html}"
-
 THROTTLE="taskset -c $BUILD_CPUS nice -n 5"
 
 # apt is possible when: root (n/a here), passwordless sudo, or an interactive
@@ -74,18 +73,28 @@ can_apt() {
 
 # Fetch a repo file: local copy if run from a clone, otherwise raw GitHub.
 # Target lives under $HOME (user-owned) — no sudo.
-fetch_user() { # $1 repo-relative path, $2 destination
+fetch_user() { # $1 repo-relative path, $2 destination, $3 mode (default 755)
   if [ -n "$HERE" ] && [ -f "$HERE/$1" ]; then
-    install -m755 "$HERE/$1" "$2"
+    install -D -m"${3:-755}" "$HERE/$1" "$2"
   else
-    tmpf=$(mktemp); curl -fsSL "$RAW/$1" -o "$tmpf" && install -m755 "$tmpf" "$2"; rm -f "$tmpf"
+    tmpf=$(mktemp); rc=0
+    curl -fsSL "$RAW/$1" -o "$tmpf" && install -D -m"${3:-755}" "$tmpf" "$2" || rc=$?
+    rm -f "$tmpf"; return "$rc"
   fi
 }
 
-# 1. Build dependencies. Vibe compiles native wheels on armhf (no prebuilt
-#    armv7l wheels for tree-sitter, zstandard, cffi, pyyaml): python3-dev + gcc
-#    + libffi-dev + pkg-config are needed, libjpeg/zlib for the imaging deps.
-#    cryptography and pydantic-core DO ship armv7l wheels — no Rust build here.
+# Release rule (Yumi wheel index + never build mistral-vibe), shared with
+# vibe-check-update. Exports UV_* — honoured by the official installer's
+# `uv tool install` and by `uv tool upgrade` alike.
+RELEASE_LIB="$HOME/.local/share/vibe-cli-smartpi/vibe-release.sh"
+fetch_user lib/vibe-release.sh "$RELEASE_LIB" 644 || fail "cannot fetch lib/vibe-release.sh"
+# shellcheck source=lib/vibe-release.sh
+. "$RELEASE_LIB"
+
+# 1. Build dependencies — fallback only: every native dependency of the
+#    installable Vibe comes as a wheel (PyPI or smartpi-wheels), but a new
+#    upstream pin can land before Yumi pre-builds it. python3-dev + gcc +
+#    libffi-dev + pkg-config for the C extensions, libjpeg/zlib for imaging.
 if can_apt; then
   log "Installing build dependencies (apt)…"
   sudo apt-get update -qq
@@ -101,7 +110,7 @@ fi
 #    ~/.local/bin). Idempotent: keyed on the uv-tool venv binary, NOT on
 #    ~/.local/bin/vibe (step 2b turns that into a wrapper).
 #    Already installed → re-run = UPDATE: `uv tool upgrade` (fast no-op when
-#    current; only a real upgrade recompiles wheels, throttled like the install).
+#    current), throttled like the install.
 #    VIBE_FORCE=1 re-runs the full official installer instead.
 if [ -x "$VIBE_TOOL_BIN" ] && [ -n "${VIBE_FORCE:-}" ]; then
   log "Vibe present — VIBE_FORCE set, reinstalling via the official installer on cores ${BUILD_CPUS}…"
@@ -111,7 +120,7 @@ elif [ -x "$VIBE_TOOL_BIN" ]; then
   command -v uv >/dev/null || fail "uv not found on PATH — re-run with VIBE_FORCE=1 to repair."
   $THROTTLE uv tool upgrade mistral-vibe || warn "uv tool upgrade failed — keeping the installed version."
 else
-  log "Installing Mistral Vibe via uv — compiles native wheels on cores ${BUILD_CPUS}, ~15 min on the H3…"
+  log "Installing Mistral Vibe via uv on cores ${BUILD_CPUS} (pre-built wheels — a few minutes on the H3)…"
   curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash \
     || fail "Vibe installer failed (see the output above)."
   [ -x "$VIBE_TOOL_BIN" ] || fail "Vibe venv not found at $VIBE_TOOL_BIN after install."
@@ -203,7 +212,7 @@ Usage:
     vibe                      full interactive TUI (type a prompt to start)
     vibe -p "question"        one-shot answer (programmatic mode)
     vibe -p "task" --yolo     one-shot, auto-approving every tool call
-    vibe --version            sanity check (~7 s cold start on the H3)
+    vibe --version            sanity check
 
     VIBE_CPUS=0,1 vibe …      limit the running agent to 2 cores (default: all 4)
 

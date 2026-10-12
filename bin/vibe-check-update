@@ -1,5 +1,6 @@
 #!/bin/sh
-# vibe-check-update — one JSON line: installed vs newest Mistral Vibe version.
+# vibe-check-update — one JSON line: installed vs newest Mistral Vibe version
+# installable on this armv7l board (not PyPI's newest: see lib/vibe-release.sh).
 #   {"cli":"vibe","installed":"1.4.2","latest":"1.5.0","update_available":true}
 #
 # Contract shared by every Yumi-Lab/*-smartpi repo (<cli>-check-update): no sudo,
@@ -9,7 +10,7 @@
 # that a bare `uv tool upgrade` would clobber).
 #
 # Installed source of truth: the uv tool venv dist-info (instant). Fallback:
-# `vibe --version` (~7 s cold Python start on the H3, hence the timeout).
+# `vibe --version` (0.6 s on 2.25; ~7 s on older releases, hence the timeout).
 
 installed=""
 for d in "$HOME"/.local/share/uv/tools/mistral-vibe/lib/python*/site-packages/mistral_vibe-*.dist-info; do
@@ -20,8 +21,17 @@ if [ -z "$installed" ] && command -v vibe >/dev/null 2>&1; then
   installed="$(timeout 30 vibe --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 fi
 
-latest="$(curl -fsSL --max-time 10 https://pypi.org/pypi/mistral-vibe/json 2>/dev/null \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])' 2>/dev/null)"
+# Latest = what uv would install here, by the SAME rule as install.sh (shared
+# lib, installed next to the tool) — so the badge never asks for an update that
+# re-running the installer can't deliver.
+latest=""
+LIB="$HOME/.local/share/vibe-cli-smartpi/vibe-release.sh"
+UV="$HOME/.local/bin/uv"
+if [ -r "$LIB" ] && [ -x "$UV" ]; then
+  # shellcheck source=lib/vibe-release.sh
+  . "$LIB"
+  latest="$(vibe_latest_installable "$UV")"
+fi
 case "$latest" in *[!0-9a-zA-Z.]*|"") latest="" ;; esac
 
 up=false

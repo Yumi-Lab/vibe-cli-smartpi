@@ -3,7 +3,8 @@
 How to run Mistral's agentic CLI on a SoC that can only execute 32-bit code
 (Allwinner H3, Cortex-A7, armv7l, 1 GB RAM). Reference document: every choice
 below was tested on a Yumi SmartPad (quad-core H3 @ 1.2 GHz, Debian 13 trixie
-armhf) on 2026-07-17 with `vibe 2.21.0` and `uv 0.11.26`.
+armhf) on 2026-07-17 with `vibe 2.21.0` and `uv 0.11.26`; re-validated end to end
+on 2026-10-12 with `vibe 2.25.0` — the newest release installable on armv7l (§3b).
 
 ## 1. Why this one is different
 
@@ -19,9 +20,11 @@ through uv** (`uv tool install mistral-vibe`, pulled from Mistral's repository).
 Python runs natively on armv7l, uv publishes a native `armv7-unknown-linux-
 gnueabihf` binary, and the official installer
 (`curl -LsSf https://mistral.ai/vibe/install.sh | bash`) has **no architecture
-gate**. It just works — almost. The two real issues on armhf are (a) a handful of
-C-extension dependencies with no prebuilt wheel, which compile on-device and heat
-the SoC, and (b) a `PATH` that the installer never wires up.
+gate**. It just works — almost. The real issues on armhf are (a) a handful of
+C-extension dependencies with no prebuilt wheel, which would compile on-device and
+heat the SoC (now pulled pre-built), (b) since 2.25.1, a native Rust component
+Mistral doesn't build for armv7l (§3b), and (c) a `PATH` that the installer never
+wires up.
 
 ## 2. The distribution model (uv, native)
 
@@ -48,12 +51,21 @@ Observed during a clean `uv tool install mistral-vibe` on the H3:
 |---|---|---|
 | `cryptography` | ✔ yes | downloaded, no build |
 | `pydantic-core` | ✔ yes (no Rust build!) | downloaded, no build |
+| `textual-speedups` | ✔ yes | downloaded, no build |
 | `mistralai`, `pygments`, … | ✔ pure-python | downloaded |
-| `tree-sitter` 0.26 | ✖ | **compiled** (C) |
-| `tree-sitter-bash` 0.25 | ✖ | **compiled** (C) |
-| `zstandard` 0.25 | ✖ | **compiled** (C, bundles the whole zstd source — the slowest single wheel) |
-| `cffi` 2.0 | ✖ | **compiled** (C) |
-| `pyyaml` 6.0.3 | ✖ | **compiled** (C) |
+| `tree-sitter` 0.26 | ✖ | compiled (C) → now **pre-built**, smartpi-wheels |
+| `tree-sitter-bash` 0.25 | ✖ | compiled (C) → now **pre-built** |
+| `zstandard` 0.25 | ✖ | compiled (C, bundles the whole zstd source — the slowest) → now **pre-built** |
+| `cffi` 2.0 | ✖ | compiled (C) → now **pre-built** |
+| `pyyaml` 6.0.3 | ✖ | compiled (C) → now **pre-built** |
+| `mistralai-vibe-local-harness` (2.25.1–2.25.5) | ✖, and no sdist | **impossible** (§3b) |
+| `mistral-vibe` itself (2.25.7+) | ✖ (sdist needs cargo) | **refused** (§3b) |
+
+Since 2026-08-10 the five C wheels come pre-built from
+[smartpi-wheels](https://github.com/Yumi-Lab/smartpi-wheels) (built once on real
+hardware, `UV_FIND_LINKS` in `lib/vibe-release.sh`): the 2026-10-12 cold install
+compiled nothing. The apt build deps below stay as the fallback for a new
+upstream pin that lands before it is pre-built.
 
 The important good news: **`cryptography` and `pydantic-core` ship armv7l
 wheels**, so there is **no Rust toolchain build** — the usual armhf nightmare
@@ -68,6 +80,42 @@ python3-dev  gcc  libffi-dev  pkg-config  libjpeg-dev  zlib1g-dev
 The build uses Debian trixie's own `arm-linux-gnueabihf-gcc 14` — no third-party
 repo, no cross-compilation.
 
+## 3b. The 2.25.1 wall: a native harness with no armv7l build
+
+On 2026-10-12 the published `install.sh` **failed on every fresh pad**: Mistral had
+moved part of Vibe to Rust, and nothing in that part exists for armv7l.
+
+| Vibe | Wheel | Native part | On armv7l |
+|---|---|---|---|
+| ≤ 2.25.0 | `py3-none-any` | none | ✔ installs |
+| 2.25.1–2.25.5 | `py3-none-any` | `mistralai-vibe-local-harness` (pyo3): wheels for x86_64 / aarch64 / macOS / Windows only, **no sdist** | ✖ unsatisfiable |
+| 2.25.7+ | `cp312-abi3` per platform, same four | harness + a Rust TUI bundled in the wheel; sdist builds with maturin and **needs cargo** (~360 + ~480 crates) | ✖ build fails |
+
+The harness is not optional — `vibe/cli/cli.py` and `entrypoint.py` import it (only
+the Rust TUI is: `VIBE_CLI=python`). 2.25.5 also adds `miniaudio` (C, no armv7l
+wheel; its build probes for `c++`). Measured on the pad:
+
+- unconstrained `uv tool install mistral-vibe` → resolves 2.26.1, builds `miniaudio`
+  (fails without g++: `No such file or directory: 'c++'`), then fails building
+  `mistral-vibe` itself: `Building Vibe from source requires the Rust toolchain,
+  but cargo was not found`;
+- pinning `mistral-vibe==2.25.5` → `mistralai-vibe-local-harness==0.5.1 has no
+  wheels with a matching platform tag (manylinux_2_41_armv7l)`.
+
+The fix is one uv rule, not a version number: **never build `mistral-vibe` from
+source** (`UV_NO_BUILD_PACKAGE=mistral-vibe`). Releases without a usable wheel
+then become incompatible and uv's resolver backtracks on its own, past the
+harness-only ones, to **2.25.0** (installed in 7 min, nothing compiled). uv stores
+the rule (and the wheel index) in the tool receipt, so later upgrades — even a
+bare `uv tool upgrade` — keep it, and the moment an armv7l wheel exists (upstream
+or in smartpi-wheels) uv takes it. The update probe asks the same question as a
+dry run (`uv pip install --dry-run --only-binary mistral-vibe`, 3 s), so the
+gateway badge reports the installable version, not PyPI's.
+
+Getting past 2.25.0 means building the 2.25.7+ wheel for armv7l elsewhere (cross-
+compiling the Rust part with maturin) and publishing it to smartpi-wheels — the
+rule above then picks it up with no change here.
+
 ## 4. Thermals: two core knobs (build + runtime)
 
 The single real hazard is heat. Both the wheel compile *and* a heavy agent loop
@@ -78,7 +126,9 @@ incident, documented in the grok methodology). So — matching `KIMI_BUILD_CPUS`
 exposes two `taskset -c … nice -n 5` knobs, **both defaulting to all 4 cores**
 (fast; the Yumi build bench adds a fan). On a **fanless** board, drop them.
 
-**`VIBE_BUILD_CPUS`** — the one-off wheel compile. The installer wraps the whole
+**`VIBE_BUILD_CPUS`** — the one-off wheel compile (today only the fallback when a
+wheel is missing from smartpi-wheels; the measurements below date from when five
+wheels still compiled on-board). The installer wraps the whole
 official installer, and `taskset` affinity is inherited by every child (uv, gcc,
 cc1), so the compile stays on the chosen cores:
 
@@ -195,6 +245,8 @@ board carries none of the inference). Get a key at
 ~/.local/bin/uv, ~/.local/bin/uvx                  native armv7 uv (installer)
 ~/.local/bin/vibe                                   VIBE_CPUS wrapper → tool venv binary (this repo)
 ~/.local/bin/vibe-signin                            headless browser sign-in helper (this repo)
+~/.local/bin/vibe-check-update                      update probe, one JSON line (this repo)
+~/.local/share/vibe-cli-smartpi/vibe-release.sh     wheel index + no-build rule (this repo, §3b)
 ~/.local/share/uv/tools/mistral-vibe/bin/vibe      the REAL Vibe binary (uv tool venv)
 ~/.local/share/uv/tools/mistral-vibe/              isolated tool environment
 ~/.vibe/config.toml                                created on first run
@@ -210,7 +262,10 @@ Useful environment variables (from `vibe --help`): `VIBE_HOME` (override
 
 ## 8. Performance and memory (1 GB H3)
 
-Measured on the SmartPad:
+Measured on the SmartPad (2.21.0, July). Re-measured on 2.25.0 (2026-10-12):
+`vibe --version` **0.56 s** (the new launcher answers it without importing the
+CLI), one-shot up to Mistral's reply (invalid key) **23.1 s wall / 19.5 s user** —
+the board-bound profile below still holds.
 
 - `vibe --version`: **6.8 s** (Python cold start of the client).
 - **One-shot `vibe -p "short prompt"`: ~20–21 s** (measured twice with a real key:
@@ -249,18 +304,28 @@ list is short — but these were tried on the H3 and rejected:
   and `pydantic-core` ship armv7l wheels, so only small C extensions compile (§3).
   Don't waste time provisioning a Rust toolchain.
 - **Blind reinstalls** — re-running the official `uv tool install` / installer over
-  an existing setup rebuilds wheels and rewrites `~/.local/bin/vibe` back to the
-  bare symlink, dropping the `VIBE_CPUS` wrapper. Use `install.sh` instead
-  (idempotent; `VIBE_FORCE=1` to actually upgrade) — see Maintenance below.
+  an existing setup rewrites `~/.local/bin/vibe` back to the bare symlink,
+  dropping the `VIBE_CPUS` wrapper. Use `install.sh` instead (idempotent, and the
+  updater) — see Maintenance below.
+- **Installing g++ so 2.25.5+ builds** — gets `miniaudio` through (~4 min of
+  single-threaded `cc1`), only to stop on the Rust harness right after (§3b).
+- **Pinning the last `py3-none-any` wheel (2.25.5)** — the wheel is pure Python but
+  depends on the native harness package, which has no armv7l wheel and no sdist.
+- **Compiling Vibe 2.25.7+ on the board** — maturin + cargo over ~840 crates on a
+  1 GB Cortex-A7: not attempted, cross-compiling elsewhere is the only sane path.
+- **`uv pip compile` as the update probe** — it resolves on metadata only and
+  answers 2.26.1 (not installable). `uv pip install --dry-run --only-binary`
+  checks the platform tags and answers 2.25.0.
 
 ## 10. Maintenance
 
-- **Upgrading**: re-run `install.sh` with `VIBE_FORCE=1` (re-runs the official
-  installer through the 2-core throttle), or `vibe --check-upgrade`. uv caches
-  the already-built wheels, so a re-run is far quicker than the first 14 min.
-- **Idempotency**: without `VIBE_FORCE`, `install.sh` detects an existing `vibe`
-  and skips the compile — it still repairs the PATH lines and earlyoom.
-- **`taskset` is only about heat**: on a board with a heatsink/fan, drop it
-  (`VIBE_BUILD_CPUS=0,1,2,3`) to cut install time roughly in half.
+- **Upgrading**: re-run `install.sh` — already installed → `uv tool upgrade
+  mistral-vibe` under the §3b rule (6 s when current; measured 2.24.5 → 2.25.0 on a
+  pad installed before the rule, whose receipt uv then rewrote), then the wrapper,
+  helpers and PATH lines are restored. `VIBE_FORCE=1` re-runs the full official
+  installer (repair).
+- **Checking**: `vibe-check-update` (one JSON line, the gateway's probe).
+- **`taskset` is only about heat**: it matters for the compile fallback; the
+  defaults already use all 4 cores (fan bench).
 - Check thermal health after heavy use:
   `cat /sys/class/thermal/thermal_zone0/temp`.
