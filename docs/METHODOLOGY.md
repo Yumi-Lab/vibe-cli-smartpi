@@ -4,7 +4,7 @@ How to run Mistral's agentic CLI on a SoC that can only execute 32-bit code
 (Allwinner H3, Cortex-A7, armv7l, 1 GB RAM). Reference document: every choice
 below was tested on a Yumi SmartPad (quad-core H3 @ 1.2 GHz, Debian 13 trixie
 armhf) on 2026-07-17 with `vibe 2.21.0` and `uv 0.11.26`; re-validated end to end
-on 2026-10-12 with `vibe 2.25.0` — the newest release installable on armv7l (§3b).
+on 2026-10-12 with `vibe 2.25.0` — the version the installer is pinned to (§3b).
 
 ## 1. Why this one is different
 
@@ -102,19 +102,21 @@ wheel; its build probes for `c++`). Measured on the pad:
 - pinning `mistral-vibe==2.25.5` → `mistralai-vibe-local-harness==0.5.1 has no
   wheels with a matching platform tag (manylinux_2_41_armv7l)`.
 
-The fix is one uv rule, not a version number: **never build `mistral-vibe` from
-source** (`UV_NO_BUILD_PACKAGE=mistral-vibe`). Releases without a usable wheel
-then become incompatible and uv's resolver backtracks on its own, past the
-harness-only ones, to **2.25.0** (installed in 7 min, nothing compiled). uv stores
-the rule (and the wheel index) in the tool receipt, so later upgrades — even a
-bare `uv tool upgrade` — keep it, and the moment an armv7l wheel exists (upstream
-or in smartpi-wheels) uv takes it. The update probe asks the same question as a
-dry run (`uv pip install --dry-run --only-binary mistral-vibe`, 3 s), so the
-gateway badge reports the installable version, not PyPI's.
+The fix is a **pin**: `VIBE_PIN=2.25.0` in `lib/vibe-release.sh`, the last
+release validated on a pad (installed in 7 min, nothing compiled). The installer
+writes it as a uv constraint (`UV_CONSTRAINT`), which even the official
+installer's bare `uv tool install mistral-vibe` obeys; uv copies it into the tool
+receipt, so a stray `uv tool upgrade` answers *"pinned to 2.25.0"* and stays put.
+An update is `uv tool install mistral-vibe==<pin>` (up or down, no-op when
+there). `UV_NO_BUILD_PACKAGE=mistral-vibe` stays as a guard: a `VIBE_VERSION`
+override without an armv7l wheel fails in 1 s in the resolver instead of a hot
+build that dies on cargo. The update probe reads `VIBE_PIN` from GitHub's main
+branch, so the gateway badge offers exactly what re-running the installer
+delivers. All of it measured on the pad on 2026-10-12.
 
-Getting past 2.25.0 means building the 2.25.7+ wheel for armv7l elsewhere (cross-
-compiling the Rust part with maturin) and publishing it to smartpi-wheels — the
-rule above then picks it up with no change here.
+Getting past 2.25.0 means building the 2.25.7+ wheel for armv7l elsewhere
+(cross-compiling the Rust part with maturin), publishing it to smartpi-wheels,
+validating it on a pad, then bumping the pin (§10).
 
 ## 4. Thermals: two core knobs (build + runtime)
 
@@ -246,7 +248,7 @@ board carries none of the inference). Get a key at
 ~/.local/bin/vibe                                   VIBE_CPUS wrapper → tool venv binary (this repo)
 ~/.local/bin/vibe-signin                            headless browser sign-in helper (this repo)
 ~/.local/bin/vibe-check-update                      update probe, one JSON line (this repo)
-~/.local/share/vibe-cli-smartpi/vibe-release.sh     wheel index + no-build rule (this repo, §3b)
+~/.local/share/vibe-cli-smartpi/vibe-release.sh     pinned version + uv rules (this repo, §3b)
 ~/.local/share/uv/tools/mistral-vibe/bin/vibe      the REAL Vibe binary (uv tool venv)
 ~/.local/share/uv/tools/mistral-vibe/              isolated tool environment
 ~/.vibe/config.toml                                created on first run
@@ -313,17 +315,26 @@ list is short — but these were tried on the H3 and rejected:
   depends on the native harness package, which has no armv7l wheel and no sdist.
 - **Compiling Vibe 2.25.7+ on the board** — maturin + cargo over ~840 crates on a
   1 GB Cortex-A7: not attempted, cross-compiling elsewhere is the only sane path.
+- **Auto-selecting the newest installable release** (no-build rule only, uv
+  backtracking past releases without an armv7l wheel) — worked on 2026-10-12
+  (resolved 2.25.0) but only guards against a *missing* wheel: a release adding
+  a dependency that has an sdist but won't compile here (like `miniaudio` without
+  c++) is still picked, and the install breaks again. Replaced by the pin.
 - **`uv pip compile` as the update probe** — it resolves on metadata only and
-  answers 2.26.1 (not installable). `uv pip install --dry-run --only-binary`
-  checks the platform tags and answers 2.25.0.
+  answers 2.26.1 (not installable).
 
 ## 10. Maintenance
 
-- **Upgrading**: re-run `install.sh` — already installed → `uv tool upgrade
-  mistral-vibe` under the §3b rule (6 s when current; measured 2.24.5 → 2.25.0 on a
-  pad installed before the rule, whose receipt uv then rewrote), then the wrapper,
-  helpers and PATH lines are restored. `VIBE_FORCE=1` re-runs the full official
-  installer (repair).
+- **Updating a pad**: re-run `install.sh` — already installed → `uv tool install
+  mistral-vibe==<pin>` (6 s when current; 2.24.5 → 2.25.0 and back measured),
+  then the wrapper, helpers and PATH lines are restored. `VIBE_FORCE=1` re-runs
+  the full official installer (repair).
+- **Moving the pin to a new Vibe** (by hand, from time to time): on a pad,
+  `VIBE_VERSION=x.y.z bash install.sh` and a real `vibe -p`; if it holds, set
+  `VIBE_PIN=x.y.z` in `lib/vibe-release.sh` and push. Every pad's
+  `vibe-check-update` then reports `update_available`. Before that, check the new
+  release still has a wheel armv7l can use (`py3-none-any` or armv7l, for Vibe
+  and its native dependencies) — §3b explains why 2.25.1+ don't.
 - **Checking**: `vibe-check-update` (one JSON line, the gateway's probe).
 - **`taskset` is only about heat**: it matters for the compile fallback; the
   defaults already use all 4 cores (fan bench).

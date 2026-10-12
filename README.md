@@ -38,17 +38,23 @@ is used only for the apt build dependencies. Nothing compiles: a cold install
 took **~7 min** on the H3, all of it resolving and downloading 96 packages over a
 slow link (measured below).
 
-### Version ceiling
+### Pinned Vibe version
 
-Since **2.25.1** (2026-09-09) Vibe needs a native Rust component (its local
-"harness") that Mistral publishes only for x86_64, aarch64, macOS and Windows —
-no armv7l build, and from 2.25.7 the only alternative is compiling ~800 Rust
-crates on a 1 GB board. So the installer tells uv **never to build
-`mistral-vibe` from source**: uv skips those releases and installs the **newest
-one that ships a usable wheel — 2.25.0** today (upstream is at 2.26.1). The day
-an armv7l build exists (upstream, or pre-built in
-[smartpi-wheels](https://github.com/Yumi-Lab/smartpi-wheels)), a plain update
-picks it up — there is no version number to bump here.
+The installer installs **one Vibe version, validated on a real Smart Pi:
+2.25.0** (`VIBE_PIN` in [lib/vibe-release.sh](lib/vibe-release.sh)) — never
+upstream's newest. Mistral releases have broken armv7l installs overnight: since
+**2.25.1** (2026-09-09) Vibe needs a native Rust component (its local
+"harness") that Mistral publishes only for x86_64, aarch64, macOS and Windows,
+and 2.25.5 added a C dependency that needs a C++ compiler. With the pin, a new
+upstream release can't break the installer; moving up is a deliberate step:
+
+1. on a pad: `VIBE_VERSION=x.y.z bash install.sh`, then check `vibe -p`;
+2. if it works, set `VIBE_PIN=x.y.z` in `lib/vibe-release.sh` and push —
+   every pad's update badge lights up, and re-running the installer moves it.
+
+Upstream is at 2.26.1; going past 2.25.0 needs an armv7l build of the Rust
+part (pre-built in [smartpi-wheels](https://github.com/Yumi-Lab/smartpi-wheels)
+like the C wheels), see [docs/METHODOLOGY.md](docs/METHODOLOGY.md) §3b.
 
 Then authenticate — Vibe supports **two methods**, both verified on the pad:
 
@@ -96,18 +102,18 @@ official installer doesn't).
 
 - **Check:** `vibe-check-update` prints one JSON line —
   `{"cli":"vibe","installed":"2.24.5","latest":"2.25.0","update_available":true}`.
-  `latest` is the newest version **installable on this board** (a uv dry run
-  under the same rule as the installer, ~3 s), not PyPI's newest — so the badge
-  never asks for an update the installer can't deliver. This is the probe the
+  `latest` is the **pinned version** read from this repo on GitHub, not PyPI's
+  newest — the badge lights up when a new version is validated and pinned, never
+  for one the board can't install. This is the probe the
   [Yumi AI Gateway](https://github.com/Yumi-Lab/yumi-ai-gateway) console polls.
 - **Update:** re-run `install.sh` — that IS the updater: already installed →
-  `uv tool upgrade mistral-vibe` (~6 s no-op when current), then the `VIBE_CPUS`
-  wrapper is restored. `VIBE_FORCE=1` re-runs the full official installer
-  (repair).
-- ⚠️ **Prefer `install.sh` over a bare `uv tool upgrade mistral-vibe`** (or `vibe
-  --check-upgrade`'s install path): an upgrade rewrites `~/.local/bin/vibe` and
-  drops the wrapper — `install.sh` restores it. (The version rule itself
-  survives: uv keeps it in the tool's receipt.)
+  `uv tool install mistral-vibe==<pin>` (~6 s no-op when current; moves up or
+  down to the pin), then the `VIBE_CPUS` wrapper is restored.
+  `VIBE_VERSION=x.y.z` overrides the pin (testing); `VIBE_FORCE=1` re-runs the
+  full official installer (repair).
+- **A stray `uv tool upgrade mistral-vibe` can't break it**: uv keeps the pin in
+  the tool's receipt and refuses to move. It does rewrite `~/.local/bin/vibe`
+  and drop the wrapper — re-run `install.sh` to restore it.
 - **Privileges:** everything lives under `$HOME` — no sudo needed after the
   first install (apt build deps): the gateway service user updates unprivileged.
 
@@ -125,8 +131,11 @@ official installer doesn't).
      (`UV_FIND_LINKS`; override the index with `VIBE_WHEELS=<url>`).
      `cryptography`, `pydantic-core`, `textual-speedups` ship armv7l wheels — no
      Rust toolchain anywhere.
-   - **Never build `mistral-vibe` itself** (`UV_NO_BUILD_PACKAGE`) — the version
-     ceiling above.
+   - **The pin** (`VIBE_PIN`, above), applied as a uv constraint so even the
+     official installer's bare `uv tool install mistral-vibe` obeys it; plus
+     **never build `mistral-vibe` itself** (`UV_NO_BUILD_PACKAGE`), so a
+     `VIBE_VERSION` with no armv7l wheel fails in seconds instead of heating the
+     board for nothing.
 3. Two `taskset`/`nice` core knobs (mirroring `KIMI_*` / `GROK_CPUS` on the sister
    repos), both defaulting to **all 4 cores** (the Yumi build bench has a fan):
    - **`VIBE_BUILD_CPUS`** — cores for the install; only matters if a wheel is
@@ -164,7 +173,7 @@ gateway's path; traffic through a VPN at ~170 KB/s):
 
 - **First install: 7 min 07 s**, no compile at all — 1 min 30 s resolving and
   2 min 37 s fetching 96 packages; the rest is uv's own download. Peak 39 °C.
-- **Update when current** (re-run `install.sh`): 6 s. **`vibe-check-update`**: 3 s.
+- **Update when current** (re-run `install.sh`): 6 s. **`vibe-check-update`**: ~1 s (one small file read from GitHub).
 - **`vibe --version`**: 0.56 s (the 2.25 launcher no longer imports the full CLI).
 - **One-shot `vibe -p "hi"` up to Mistral's reply**: 23.1 s wall, **19.5 s user
   CPU** (measured with a deliberately invalid key: the request reaches Mistral and

@@ -15,10 +15,10 @@
 #   earlyoom                              anti-freeze memory safety net (1 GB RAM)
 #
 # OTA contract (shared by every Yumi-Lab/*-smartpi repo):
-#   * re-running this script IS the update: already installed → `uv tool upgrade
-#     mistral-vibe` (fast no-op when current), then the VIBE_CPUS wrapper is
-#     restored (an upgrade rewrites ~/.local/bin/vibe). VIBE_FORCE=1 re-runs the
-#     full official installer instead;
+#   * re-running this script IS the update: already installed → `uv tool install
+#     mistral-vibe==<pin>` (fast no-op when current), then the VIBE_CPUS wrapper
+#     is restored (uv rewrites ~/.local/bin/vibe). VIBE_VERSION=x.y.z overrides
+#     the pin; VIBE_FORCE=1 re-runs the full official installer instead;
 #   * `vibe-check-update` prints one JSON line {installed, latest,
 #     update_available} — what the Yumi AI Gateway polls for its update badge;
 #   * everything lives under $HOME → no sudo needed after the first install
@@ -27,10 +27,10 @@
 # Vibe is a Python application distributed through uv, not a prebuilt binary — so
 # unlike its 64-bit-only sister CLIs (grok, claude), the OFFICIAL installer runs
 # on armv7l as-is. Two catches: a few C-extension dependencies have no armv7l
-# wheel (Yumi pre-builds them), and since 2.25.1 Vibe itself needs a native Rust
-# harness Mistral doesn't build for armv7l — so uv is told never to build
-# mistral-vibe, and installs the newest release that ships a usable wheel.
-# Both rules live in lib/vibe-release.sh.
+# wheel (Yumi pre-builds them), and new upstream releases can stop installing on
+# armv7l overnight (2.25.1+ need a native Rust harness Mistral doesn't build for
+# it) — so the installer is PINNED to the last release validated on a pad
+# (VIBE_PIN, bumped by hand). Both live in lib/vibe-release.sh.
 #
 # Two core-control knobs, matching kimi-cli-smartpi (KIMI_*) / grok-cli-smartpi:
 #   VIBE_BUILD_CPUS   cores for the one-off wheel COMPILE (this installer)
@@ -47,7 +47,7 @@ BUILD_CPUS="${VIBE_BUILD_CPUS:-0,1,2,3}"
 VIBE_INSTALLER="https://mistral.ai/vibe/install.sh"
 # Real uv-tool binary behind ~/.local/bin/vibe (which we turn into a wrapper).
 VIBE_TOOL_BIN="$HOME/.local/share/uv/tools/mistral-vibe/bin/vibe"
-RAW="https://raw.githubusercontent.com/Yumi-Lab/vibe-cli-smartpi/main"
+RAW="https://raw.githubusercontent.com/Yumi-Lab/vibe-cli-smartpi/main"   # = VIBE_RAW; needed to fetch the lib itself
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || true)"
 
 log()  { printf '\033[1;36m[vibe-smartpi]\033[0m %s\n' "$*"; }
@@ -83,13 +83,16 @@ fetch_user() { # $1 repo-relative path, $2 destination, $3 mode (default 755)
   fi
 }
 
-# Release rule (Yumi wheel index + never build mistral-vibe), shared with
-# vibe-check-update. Exports UV_* — honoured by the official installer's
-# `uv tool install` and by `uv tool upgrade` alike.
+# Pinned version + uv rules, shared with vibe-check-update (lib/vibe-release.sh).
 RELEASE_LIB="$HOME/.local/share/vibe-cli-smartpi/vibe-release.sh"
 fetch_user lib/vibe-release.sh "$RELEASE_LIB" 644 || fail "cannot fetch lib/vibe-release.sh"
 # shellcheck source=lib/vibe-release.sh
 . "$RELEASE_LIB"
+# The official installer runs a bare `uv tool install mistral-vibe` (= upstream's
+# newest): a uv constraint holds it, and every uv call below, to the pin.
+UV_CONSTRAINT="$(mktemp /var/tmp/vibe-pin.XXXXXX)"; export UV_CONSTRAINT
+trap 'rm -f "$UV_CONSTRAINT"' EXIT
+echo "$VIBE_PKG==$VIBE_VERSION" > "$UV_CONSTRAINT"
 
 # 1. Build dependencies — fallback only: every native dependency of the
 #    installable Vibe comes as a wheel (PyPI or smartpi-wheels), but a new
@@ -109,18 +112,18 @@ fi
 # 2. Mistral Vibe via its official installer (which also brings uv into
 #    ~/.local/bin). Idempotent: keyed on the uv-tool venv binary, NOT on
 #    ~/.local/bin/vibe (step 2b turns that into a wrapper).
-#    Already installed → re-run = UPDATE: `uv tool upgrade` (fast no-op when
-#    current), throttled like the install.
+#    Already installed → re-run = UPDATE to the pin: `uv tool install
+#    mistral-vibe==$VIBE_VERSION` (no-op when already there; moves up OR down).
 #    VIBE_FORCE=1 re-runs the full official installer instead.
 if [ -x "$VIBE_TOOL_BIN" ] && [ -n "${VIBE_FORCE:-}" ]; then
   log "Vibe present — VIBE_FORCE set, reinstalling via the official installer on cores ${BUILD_CPUS}…"
   curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash
 elif [ -x "$VIBE_TOOL_BIN" ]; then
-  log "Vibe already installed ($("$VIBE_TOOL_BIN" --version 2>/dev/null | head -1)) — checking for an upgrade…"
+  log "Vibe already installed ($("$VIBE_TOOL_BIN" --version 2>/dev/null | head -1)) — pinned version: $VIBE_VERSION…"
   command -v uv >/dev/null || fail "uv not found on PATH — re-run with VIBE_FORCE=1 to repair."
-  $THROTTLE uv tool upgrade mistral-vibe || warn "uv tool upgrade failed — keeping the installed version."
+  $THROTTLE uv tool install "$VIBE_PKG==$VIBE_VERSION" || warn "uv tool install failed — keeping the installed version."
 else
-  log "Installing Mistral Vibe via uv on cores ${BUILD_CPUS} (pre-built wheels — a few minutes on the H3)…"
+  log "Installing Mistral Vibe $VIBE_VERSION via uv on cores ${BUILD_CPUS} (pre-built wheels — a few minutes on the H3)…"
   curl -LsSf "$VIBE_INSTALLER" | $THROTTLE bash \
     || fail "Vibe installer failed (see the output above)."
   [ -x "$VIBE_TOOL_BIN" ] || fail "Vibe venv not found at $VIBE_TOOL_BIN after install."
@@ -219,8 +222,8 @@ Usage:
 Notes:
     * If `vibe` is "not found" after reconnecting: open a new shell, or run
       `. ~/.profile` — the installer just added ~/.local/bin to your PATH.
-    * To upgrade later: just re-run install.sh (already installed → uv tool
-      upgrade + wrapper restored). Check first with vibe-check-update.
+    * To update: just re-run install.sh (moves to the pinned version validated
+      on a Smart Pi + restores the wrapper). Check first with vibe-check-update.
       VIBE_FORCE=1 re-runs the full official installer (repair).
     * NEVER a bare `uv tool upgrade mistral-vibe`: it rewrites ~/.local/bin/vibe
       and drops the VIBE_CPUS wrapper — install.sh restores it.

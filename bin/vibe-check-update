@@ -1,6 +1,7 @@
 #!/bin/sh
-# vibe-check-update — one JSON line: installed vs newest Mistral Vibe version
-# installable on this armv7l board (not PyPI's newest: see lib/vibe-release.sh).
+# vibe-check-update — one JSON line: installed vs the Mistral Vibe version the
+# installer is pinned to (VIBE_PIN in lib/vibe-release.sh on GitHub, i.e. the
+# newest release validated on a Smart Pi — not PyPI's newest).
 #   {"cli":"vibe","installed":"1.4.2","latest":"1.5.0","update_available":true}
 #
 # Contract shared by every Yumi-Lab/*-smartpi repo (<cli>-check-update): no sudo,
@@ -21,16 +22,17 @@ if [ -z "$installed" ] && command -v vibe >/dev/null 2>&1; then
   installed="$(timeout 30 vibe --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 fi
 
-# Latest = what uv would install here, by the SAME rule as install.sh (shared
-# lib, installed next to the tool) — so the badge never asks for an update that
-# re-running the installer can't deliver.
+# Latest = the pin on GitHub's main branch, i.e. exactly what re-running the
+# installer delivers: the badge lights up when a new version is validated and
+# pinned, never for an upstream release the board can't install. Parsed, not
+# sourced: the probe runs no downloaded code.
 latest=""
 LIB="$HOME/.local/share/vibe-cli-smartpi/vibe-release.sh"
-UV="$HOME/.local/bin/uv"
-if [ -r "$LIB" ] && [ -x "$UV" ]; then
+if [ -r "$LIB" ]; then
   # shellcheck source=lib/vibe-release.sh
   . "$LIB"
-  latest="$(vibe_latest_installable "$UV")"
+  latest="$(curl -fsSL --max-time 10 "$VIBE_RAW/lib/vibe-release.sh" 2>/dev/null \
+    | sed -n 's/^VIBE_PIN=//p')"
 fi
 case "$latest" in *[!0-9a-zA-Z.]*|"") latest="" ;; esac
 
