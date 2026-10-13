@@ -175,9 +175,12 @@ gateway's path; traffic through a VPN at ~170 KB/s):
   2 min 37 s fetching 96 packages; the rest is uv's own download. Peak 39 °C.
 - **Update when current** (re-run `install.sh`): 6 s. **`vibe-check-update`**: ~1 s (one small file read from GitHub).
 - **`vibe --version`**: 0.56 s (the 2.25 launcher no longer imports the full CLI).
-- **One-shot `vibe -p "hi"` up to Mistral's reply**: 23.1 s wall, **19.5 s user
-  CPU** (measured with a deliberately invalid key: the request reaches Mistral and
-  comes back `Invalid API key` — the full client path, minus the model's answer).
+- **Real one-shot with a real key** (2026-10-13): *"capital of Italy?"* →
+  `La capitale de l'Italie est Rome.` in **25.7 s** end to end (of which ~3 s is
+  the model's turn, per Vibe's session stats; the rest is the client on the A7).
+- **Real agent task with tools** (`--yolo`): create `bonjour.txt` with a given
+  line, run `uname -m`, report it → file written byte-exact, answer `armv7l`, in
+  **31.3 s**. 36 → 40 °C over both runs (fan bench).
 - `VIBE_CPUS=1` / `0,2` verified on the live process (affinity + nice 5).
 
 **2026-07-17, `vibe 2.21.0`** (when 5 wheels still compiled on the board):

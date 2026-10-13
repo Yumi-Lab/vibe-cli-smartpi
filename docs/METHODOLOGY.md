@@ -266,8 +266,9 @@ Useful environment variables (from `vibe --help`): `VIBE_HOME` (override
 
 Measured on the SmartPad (2.21.0, July). Re-measured on 2.25.0 (2026-10-12):
 `vibe --version` **0.56 s** (the new launcher answers it without importing the
-CLI), one-shot up to Mistral's reply (invalid key) **23.1 s wall / 19.5 s user** —
-the board-bound profile below still holds.
+CLI); 2026-10-13 with a real key, a one-shot answer in **25.7 s** (the model's turn
+~3 s per Vibe's session stats) and an agent task with tools (`--yolo`: write a
+file, run `uname -m`) in **31.3 s** — the board-bound profile below still holds.
 
 - `vibe --version`: **6.8 s** (Python cold start of the client).
 - **One-shot `vibe -p "short prompt"`: ~20–21 s** (measured twice with a real key:
